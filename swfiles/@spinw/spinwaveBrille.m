@@ -1,8 +1,70 @@
 function spectra = spinwaveBrille(obj, hkl, varargin)
 
-[omega, V] = spinwaveEigVecs(obj, hkl, varargin{:});
+inpForm.fname  = {'tol', 'max_volume'};
+inpForm.defval = {1e-4,  1e-4};
+inpForm.size   = {[1 1], [1, 1]};
 
-spectra = spinwave_structureFact(obj, hkl, omega, V, varargin{:});
+param = sw_readparam(inpForm, varargin{:});
+
+% generate magnetic structure in the rotating noation
+magStr = obj.magstr;
+% size of the extended magnetic unit cell
+nExt    = magStr.N_ext;
+% magnetic ordering wavevector in the extended magnetic unit cell
+km = magStr.k.*nExt;
+% whether the structure is incommensurate
+incomm = any(abs(km-round(km)) > param.tol);
+
+% Work out the dimensions of the supercell if required
+lens = nExt.*obj.lattice.lat_const;
+% What is p0 symmetry? spglib doesn't know it. So, sorry
+if strmatch(obj.lattice.label, 'P 0')
+    warning('spinw:spinwaveBrille', 'The symmetry is P0, falling back to spinw.spinwave')
+    spectra = obj.spinwave(hkl, varargin{:});
+    return
+end
+
+% Create a Brille lattice
+[~, rlat]=brille.lattice(lens, obj.lattice.angle, ...
+    'radian', 'direct', 'spgr', obj.lattice.label);
+% Use the Brille lattice to create a Brillouin Zone
+bz = brille.brillouinzone(rlat, varargin);
+
+% Create an interpolation matrix from the Brillouin Zone, with some minimum
+% spacing
+inter = brille.BZTrellisQ(bz, 'max_volume', param.max_volume, 'complex', true);
+% Get the interpolation points from the Brillouin zone
+interQ = brille.p2m(inter.rlu);
+
+% Calculate the eigen values/vectors of the Brillouin zone points
+[omega, V] = spinwaveEigVecs(obj, interQ', varargin{:});
+
+% Reshape into what Brille requires
+VV = cat(3, permute(omega, [2, 1, 3]), permute(V, [3, 1, 2]));
+if incomm
+    VV = reshape(VV, [], 3, size(VV, 2), size(VV, 3));
+end
+
+% opt = uint16([1, size(V, 2), 0, 0]);
+% inter.fill(brille.m2p(VV), opt)
+
+% Add the calculated eigen values/vectors to the interpolation object
+inter.fill(brille.m2p(VV), uint16([2*prod(nExt) + 1, 0 , 0, 0]))
+
+% Call the interpolation object with the required HKL
+hkl = sw_qscan(hkl);
+VVnew = brille.p2m(inter.ir_interpolate_at(brille.m2p(hkl')));
+
+% Do the inverse of Brille formatting to get spinW formated eigen
+% values/vectors
+if incomm
+    VVnew = reshape(VVnew, [], size(VV, 2), size(VV, 3));
+end
+Vnew = permute(VVnew(:, 1:end-1, :), [2, 3, 1]);
+omegaNew = squeeze(VVnew(:, end, :))';
+
+% Use the Brille eigen values/vectors to create a spectra object.
+spectra = spinwave_structureFact(obj, hkl, omegaNew, Vnew, varargin{:});
 
 end
 
@@ -47,20 +109,20 @@ function spectra = spinwave_structureFact(obj, hkl, omega, V, varargin)
 % >>sw_plotspec(spec)
 % >>snapnow
 % ```
-% 
+%
 % ### Input Arguments
 %
 % `obj`
 % : [spinw] object.
-% 
+%
 % `Q`
 % : Defines the $Q$ points where the spectra is calculated, in reciprocal
 %   lattice units, size is $[3\times n_{Q}]$. $Q$ can be also defined by
 %   several linear scan in reciprocal space. In this case `Q` is cell type,
 %   where each element of the cell defines a point in $Q$ space. Linear scans
 %   are assumed between consecutive points. Also the number of $Q$ points can
-%   be specified as a last element, it is 100 by defaults. 
-%   
+%   be specified as a last element, it is 100 by defaults.
+%
 %   For example to define a scan along $(h,0,0)$ from $h=0$ to $h=1$ using
 %   200 $Q$ points the following input should be used:
 %   ```
@@ -68,7 +130,7 @@ function spectra = spinwave_structureFact(obj, hkl, omega, V, varargin)
 %   ```
 %
 %   For symbolic calculation at a general reciprocal space point use `sym`
-%   type input. 
+%   type input.
 %
 %   For example to calculate the spectrum along $(h,0,0)$ use:
 %   ```
@@ -96,7 +158,7 @@ function spectra = spinwave_structureFact(obj, hkl, omega, V, varargin)
 %   F = formfactfun(atomLabel,Q)
 %   ```
 %   where the parameters are:
-%   * `F`           row vector containing the form factor for every input 
+%   * `F`           row vector containing the form factor for every input
 %                   $Q$ value
 %   * `atomLabel`   string, label of the selected magnetic atom
 %   * `Q`           matrix with dimensions of $[3\times n_Q]$, where each
@@ -110,7 +172,7 @@ function spectra = spinwave_structureFact(obj, hkl, omega, V, varargin)
 %   function.
 %
 % `'fitmode'`
-% : If `true`, function is optimized for multiple consecutive calls (e.g. 
+% : If `true`, function is optimized for multiple consecutive calls (e.g.
 %   the output spectrum won't contain the copy of `obj`), default is
 %   `false`.
 %
@@ -119,7 +181,7 @@ function spectra = spinwave_structureFact(obj, hkl, omega, V, varargin)
 % `false`.
 %
 % `'sortMode'`
-% : If `true`, the spin wave modes will be sorted by continuity. Default is 
+% : If `true`, the spin wave modes will be sorted by continuity. Default is
 %   `true`.
 %
 % `'optmem'`
@@ -140,7 +202,7 @@ function spectra = spinwave_structureFact(obj, hkl, omega, V, varargin)
 %
 % `'hermit'`
 % : Method for matrix diagonalization with the following logical values:
-% 
+%
 %   * `true`    using Colpa's method (for details see [J.H.P. Colpa, Physica 93A (1978) 327](http://www.sciencedirect.com/science/article/pii/0378437178901607)),
 %               the dynamical matrix is converted into another Hermitian
 %               matrix, that will give the real eigenvalues.
@@ -153,7 +215,7 @@ function spectra = spinwave_structureFact(obj, hkl, omega, V, varargin)
 %   expected. In this case only White's method work. The solution in this
 %   case is wrong, however by examining the eigenvalues it can give a hint
 %   where the problem is.}}
-%               
+%
 % `'saveH'`
 % : If true, the quadratic form of the Hamiltonian is also saved in the
 %   output. Be carefull, it can take up lots of memory. Default value is
@@ -397,10 +459,10 @@ if incomm
         % calculate dispersion for (k-km, k, k+km)
         hkl{tt}  = [bsxfun(@minus,hkl{tt},km') hkl{tt} bsxfun(@plus,hkl{tt},km')];
     end
-    nHkl  = nHkl*3;
     nHkl0 = nHkl0*3;
 else
     hkl0   = hkl;
+    hklExt = hkl;
 end
 
 hkl    = cell2mat(hkl);
@@ -409,7 +471,7 @@ hklExt = cell2mat(hklExt);
 
 % Create the interaction matrix and atomic positions in the extended
 % magnetic unit cell.
-[SS, SI, RR] = obj.intmatrix('fitmode',true,'conjugate',true);
+[~, SI, RR] = obj.intmatrix('fitmode',true,'conjugate',true);
 
 
 hklExt0 = bsxfun(@times,hkl0,nExt')*2*pi;
@@ -464,24 +526,6 @@ end
 % every magnetic atom
 zed = e1 + 1i*e2;
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-% MEMORY MANAGEMENT LOOP
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-if param.optmem == 0
-    freeMem = sw_freemem;
-    if freeMem > 0
-        nSlice = ceil(nMagExt^2*nHkl*6912/freeMem*2);
-    else
-        nSlice = 1;
-        if ~param.fitmode
-            warning('spinw:spinwave:FreeMemSize','The size of the free memory is unkown, no memory optimisation!');
-        end
-    end
-else
-    nSlice = param.optmem;
-end
-
 if param.gtensor
     
     gtensor = SI.g;
@@ -512,47 +556,47 @@ if param.formfact
 else
     spectra.formfact = false;
 end
-    
+
 nHklMEM = size(hklExt,2);
 
-    % Calculates correlation functions.
-    % V right
-    VExtR = repmat(permute(V  ,[4 5 1 2 3]),[3 3 1 1 1]);
-    % V left: conjugate transpose of V
-    VExtL = conj(permute(VExtR,[1 2 4 3 5]));
-    
-    % Introduces the exp(-ikR) exponential factor.
-    ExpF =  exp(-1i*sum(repmat(permute(hklExt0,[1 3 2]),[1 nMagExt 1]).*repmat(RR,[1 1 nHklMEM]),1));
-    % Includes the sqrt(Si/2) prefactor.
-    ExpF = ExpF.*repmat(sqrt(S0/2),[1 1 nHklMEM]);
-    
-    ExpFL =      repmat(permute(ExpF,[1 4 5 2 3]),[3 3 2*nMagExt 2]);
-    % conj transpose of ExpFL
-    ExpFR = conj(permute(ExpFL,[1 2 4 3 5]));
-    
-    zeda = repmat(permute([zed conj(zed)],[1 3 4 2]),[1 3 2*nMagExt 1 nHklMEM]);
-    % conj transpose of zeda
-    zedb = conj(permute(zeda,[2 1 4 3 5]));
-    
-    % calculate magnetic structure factor using the hklExt0 Q-values
-    % since the S(Q+/-k,omega) correlation functions also belong to the
-    % F(Q)^2 form factor
-    
-    if param.formfact
-        % include the form factor in the z^alpha, z^beta matrices
-        zeda = zeda.*repmat(permute(FF(:,hklIdxMEM),[3 4 5 1 2]),[3 3 2*nMagExt 2 1]);
-        zedb = zedb.*repmat(permute(FF(:,hklIdxMEM),[3 4 1 5 2]),[3 3 2 2*nMagExt 1]);
-    end
-    
-    if param.gtensor
-        % include the g-tensor
-        zeda = mmat(repmat(permute(gtensor,[1 2 4 3]),[1 1 1 2]),zeda);
-        zedb = mmat(zedb,repmat(gtensor,[1 1 2]));
-    end
-    % Dynamical structure factor from S^alpha^beta(k) correlation function.
-    % Sab(alpha,beta,iMode,iHkl), size: 3 x 3 x 2*nMagExt x nHkl.
-    % Normalizes the intensity to single unit cell.
-    Sab = cat(4,Sab,squeeze(sum(zeda.*ExpFL.*VExtL,4)).*squeeze(sum(zedb.*ExpFR.*VExtR,3))/prod(nExt));
+% Calculates correlation functions.
+% V right
+VExtR = repmat(permute(V  ,[4 5 1 2 3]),[3 3 1 1 1]);
+% V left: conjugate transpose of V
+VExtL = conj(permute(VExtR,[1 2 4 3 5]));
+
+% Introduces the exp(-ikR) exponential factor.
+ExpF =  exp(-1i*sum(repmat(permute(hklExt0,[1 3 2]),[1 nMagExt 1]).*repmat(RR,[1 1 nHklMEM]),1));
+% Includes the sqrt(Si/2) prefactor.
+ExpF = ExpF.*repmat(sqrt(S0/2),[1 1 nHklMEM]);
+
+ExpFL =      repmat(permute(ExpF,[1 4 5 2 3]),[3 3 2*nMagExt 2]);
+% conj transpose of ExpFL
+ExpFR = conj(permute(ExpFL,[1 2 4 3 5]));
+
+zeda = repmat(permute([zed conj(zed)],[1 3 4 2]),[1 3 2*nMagExt 1 nHklMEM]);
+% conj transpose of zeda
+zedb = conj(permute(zeda,[2 1 4 3 5]));
+
+% calculate magnetic structure factor using the hklExt0 Q-values
+% since the S(Q+/-k,omega) correlation functions also belong to the
+% F(Q)^2 form factor
+
+if param.formfact
+    % include the form factor in the z^alpha, z^beta matrices
+    zeda = zeda.*repmat(permute(FF(:,hklIdxMEM),[3 4 5 1 2]),[3 3 2*nMagExt 2 1]);
+    zedb = zedb.*repmat(permute(FF(:,hklIdxMEM),[3 4 1 5 2]),[3 3 2 2*nMagExt 1]);
+end
+
+if param.gtensor
+    % include the g-tensor
+    zeda = mmat(repmat(permute(gtensor,[1 2 4 3]),[1 1 1 2]),zeda);
+    zedb = mmat(zedb,repmat(gtensor,[1 1 2]));
+end
+% Dynamical structure factor from S^alpha^beta(k) correlation function.
+% Sab(alpha,beta,iMode,iHkl), size: 3 x 3 x 2*nMagExt x nHkl.
+% Normalizes the intensity to single unit cell.
+Sab = cat(4,Sab,squeeze(sum(zeda.*ExpFL.*VExtL,4)).*squeeze(sum(zedb.*ExpFR.*VExtR,3))/prod(nExt));
 
 if param.sortMode
     % sort the spin wave modes
@@ -849,7 +893,7 @@ twinIdx = twinIdx(:);
 
 % Create the interaction matrix and atomic positions in the extended
 % magnetic unit cell.
-[SS, SI, RR] = obj.intmatrix('fitmode',true,'conjugate',true);
+[SS, SI, ~] = obj.intmatrix('fitmode',true,'conjugate',true);
 
 % add the dipolar interactions to SS.all
 SS.all = [SS.all SS.dip];
