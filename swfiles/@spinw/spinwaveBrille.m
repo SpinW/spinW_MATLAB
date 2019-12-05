@@ -17,16 +17,14 @@ incomm = any(abs(km-round(km)) > param.tol);
 
 % Work out the dimensions of the supercell if required
 lens = nExt.*obj.lattice.lat_const;
-% What is p0 symmetry? spglib doesn't know it. So, sorry
-if strmatch(obj.lattice.label, 'P 0')
-    warning('spinw:spinwaveBrille', 'The symmetry is P0, falling back to spinw.spinwave')
-    spectra = obj.spinwave(hkl, varargin{:});
-    return
-end
 
 % Create a Brille lattice
 [~, rlat]=brille.lattice(lens, obj.lattice.angle, ...
     'radian', 'direct', 'spgr', obj.lattice.label);
+if (brille.p2m(rlat.hall) == 0)
+    warning('spinw:spinwaveBrille', 'The symmetry is P0, falling back to P1')
+    rlat.hall = uint16(1); % Force P1 symmetry
+end
 % Use the Brille lattice to create a Brillouin Zone
 bz = brille.brillouinzone(rlat, varargin);
 
@@ -49,7 +47,10 @@ end
 % inter.fill(brille.m2p(VV), opt)
 
 % Add the calculated eigen values/vectors to the interpolation object
-inter.fill(brille.m2p(VV), uint16([2*prod(nExt) + 1, 0 , 0, 0]))
+% inter.fill(brille.m2p(VV), uint16([2*prod(nExt) + 1, 0 , 0]))
+size_VV = size(VV);
+num_el = prod(size_VV(3:end));
+inter.fill(brille.m2p(VV),int32([num_el,0,0]));
 
 % Call the interpolation object with the required HKL
 hkl = sw_qscan(hkl);
@@ -58,10 +59,10 @@ VVnew = brille.p2m(inter.ir_interpolate_at(brille.m2p(hkl')));
 % Do the inverse of Brille formatting to get spinW formated eigen
 % values/vectors
 if incomm
-    VVnew = reshape(VVnew, [], size(VV, 2), size(VV, 3));
+    VVnew = reshape(VVnew, [], size(VV, 3), size(VV, 4));
 end
-Vnew = permute(VVnew(:, 1:end-1, :), [2, 3, 1]);
-omegaNew = squeeze(VVnew(:, end, :))';
+Vnew = permute(VVnew(:, :, 2:end), [2, 3, 1]);
+omegaNew = squeeze(VVnew(:, :, 1))';
 
 % Use the Brille eigen values/vectors to create a spectra object.
 spectra = spinwave_structureFact(obj, hkl, omegaNew, Vnew, varargin{:});
